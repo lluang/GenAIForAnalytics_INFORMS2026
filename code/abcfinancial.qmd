@@ -1,0 +1,213 @@
+---
+title: "ABC Financial model for INFORMS Analytics+ 2026"
+format: pdf
+---
+
+# Load data 
+
+```{python}
+import pandas as pd
+import numpy as np
+import io
+
+# 1. Import the clean datasets directly
+assets_df = pd.read_csv('../data/assets.csv')
+loan_profitability_df = pd.read_csv('../data/loan_profitability_per_quarter.csv')
+segment_profitability_df = pd.read_csv('../data/segment_profitability_means.csv')
+
+# 2. Pre-process and import segments.csv to fix line-break corruption
+def clean_segments_data(filepath):
+    clean_lines = []
+    with open(filepath, 'r') as file:
+        current_line = ""
+        for line in file:
+            # Strip trailing whitespace/newlines and accumulate
+            current_line += line.strip()
+            
+            # A valid row in segments.csv has exactly 6 columns (5 commas).
+            # If the current line has 5 or more commas, it's a complete record.
+            if current_line.count(',') >= 5:
+                clean_lines.append(current_line)
+                current_line = "" # Reset for the next record
+                
+    # Convert the list of cleaned string lines back into a pandas DataFrame
+    cleaned_csv_string = '\n'.join(clean_lines)
+    return pd.read_csv(io.StringIO(cleaned_csv_string))
+
+# Load the cleaned segments data
+segments_df = clean_segments_data('../data/segments.csv')
+
+# Verify the imports
+print("Assets Data Shape:", assets_df.shape)
+print("Quarterly Profitability Data Shape:", loan_profitability_df.shape)
+print("Segment Means Data Shape:", segment_profitability_df.shape)
+print("Cleaned Segments Data Shape:", segments_df.shape)
+```
+
+```{python}
+# 1. Map segment-level parameters (from segments_df)
+# Set 'segment_id' as the index to create dictionary mappings for each parameter
+E = segments_df.set_index('segment_id')['exposure'].to_dict()
+RW = segments_df.set_index('segment_id')['risk_weight'].to_dict()
+SC = segments_df.set_index('segment_id')['rel_sell_cost'].to_dict()
+OC = segments_df.set_index('segment_id')['rel_origination_cost'].to_dict()
+
+# 2. Map the profitability parameter (from segment_profitability_df)
+# Based on the provided columns for segment_profitability_df (Rating, PersonalLoans, HomeLoan, etc.),
+# we need to transform it to get 'segment_id' and 'average_profitability'.
+# We assume segment_id in segments_df is structured as 'AssetType_Rating' (e.g., 'PersonalLoans_Prime').
+
+# Identify the columns that represent asset types (profitability values)
+profitability_cols = [col for col in segment_profitability_df.columns if col != 'Rating']
+
+# Melt the DataFrame to transform it from wide to long format.
+# This will create columns: 'Rating', 'asset', 'average_profitability'.
+melted_profitability_df = segment_profitability_df.melt(
+    id_vars=['Rating'],
+    value_vars=profitability_cols,
+    var_name='asset',
+    value_name='average_profitability'
+)
+
+# Create the 'segment_id' column by combining 'asset' and 'Rating'
+melted_profitability_df['segment_id'] = melted_profitability_df.apply(lambda row: f"{row['asset']}_{row['Rating']}", axis=1)
+P = melted_profitability_df.set_index('segment_id')['average_profitability'].to_dict()
+
+# 3. Map asset-level constraint parameters (from assets_df)
+# Set 'asset' as the index to create dictionary mappings for the growth/shrink boundaries
+max_inc = assets_df.set_index('asset')['max_exposure_increase'].to_dict()
+max_dec = assets_df.set_index('asset')['max_exposure_decrease'].to_dict()
+
+# 4. Create the asset_mapping dictionary
+# Group segments by their parent asset to create a dictionary where keys are asset names 
+# and values are lists of associated segment_ids (e.g., {'PersonalLoans': ['PersonalLoans_Prime', ...]})
+asset_mapping = segments_df.groupby('asset')['segment_id'].apply(list).to_dict()
+
+# Print a few samples to verify the mapping
+print("Sample Expected Profitability (P):", list(P.items())[:2])
+print("Sample Asset Mapping:", list(asset_mapping.items())[:1])
+```
+
+```{python}
+import pyomo.environ as pyo
+
+def build_portfolio_model(E, P, RW, SC, OC, max_inc, max_dec, asset_mapping):
+    """
+    Builds the ABC Financial Portfolio Rebalancing Model.
+    
+    Expected Inputs:
+    - E, P, RW, SC, OC: Dictionaries keyed by segment_id (e.g., 'PersonalLoans_Prime')
+    - max_inc, max_dec: Dictionaries keyed by asset type (e.g., 'PersonalLoans')
+    - asset_mapping: Dictionary keyed by asset type, containing a list of segment_ids.
+    """
+    
+    # Create the concrete model object
+    model = pyo.ConcreteModel(name="ABC_Financial_Portfolio")
+    
+    # --- Sets ---
+    # Define the sets based on the provided dictionary keys
+    model.Assets = pyo.Set(initialize=list(asset_mapping.keys()))
+    model.Segments = pyo.Set(initialize=list(E.keys()))
+    
+    # --- Parameters ---
+    model.E = pyo.Param(model.Segments, initialize=E)
+    model.P = pyo.Param(model.Segments, initialize=P)
+    model.RW = pyo.Param(model.Segments, initialize=RW)
+    model.SC = pyo.Param(model.Segments, initialize=SC)
+    model.OC = pyo.Param(model.Segments, initialize=OC)
+    
+    model.MaxInc = pyo.Param(model.Assets, initialize=max_inc)
+    model.MaxDec = pyo.Param(model.Assets, initialize=max_dec)
+    
+    # --- Decision Variables ---
+    # Cannot sell more than the current baseline exposure
+    def sell_bounds_rule(m, i):
+        return (0, m.E[i])
+    
+    # Declare variables with their domains and bounds
+    model.S = pyo.Var(model.Segments, domain=pyo.NonNegativeReals, bounds=sell_bounds_rule)
+    model.O = pyo.Var(model.Segments, domain=pyo.NonNegativeReals)
+    
+    # --- Objective ---
+    def obj_rule(m):
+        return sum(
+            m.P[i] * (m.E[i] - m.S[i] + m.O[i]) - m.SC[i] * m.S[i] - m.OC[i] * m.O[i]
+            for i in m.Segments
+        )
+    model.obj = pyo.Objective(rule=obj_rule, sense=pyo.maximize)
+    
+    # --- Constraints ---
+    # 1. Regulatory Average Risk Weight Limit (<= 50%)
+    def risk_weight_rule(m):
+        total_risk_weighted_exposure = sum(m.RW[i] * (m.E[i] - m.S[i] + m.O[i]) for i in m.Segments)
+        total_new_exposure = sum(m.E[i] - m.S[i] + m.O[i] for i in m.Segments)
+        # Avoid non-linear division by multiplying both sides by the denominator
+        return total_risk_weighted_exposure <= 0.50 * total_new_exposure
+    model.risk_weight_con = pyo.Constraint(rule=risk_weight_rule)
+    
+    # 2. Regulatory Total Exposure Growth Limit (<= 20%)
+    def exposure_growth_rule(m):
+        total_new_exposure = sum(m.E[i] - m.S[i] + m.O[i] for i in m.Segments)
+        total_old_exposure = sum(m.E[i] for i in m.Segments)
+        return total_new_exposure <= 1.20 * total_old_exposure
+    model.exposure_growth_con = pyo.Constraint(rule=exposure_growth_rule)
+    
+    # 3. Asset-Level Growth Limits
+    def asset_growth_rule(m, a):
+        old_asset_exposure = sum(m.E[i] for i in asset_mapping[a])
+        new_asset_exposure = sum(m.E[i] - m.S[i] + m.O[i] for i in asset_mapping[a])
+        return new_asset_exposure <= old_asset_exposure * (1.0 + m.MaxInc[a])
+    model.asset_growth_con = pyo.Constraint(model.Assets, rule=asset_growth_rule)
+    
+    # 4. Asset-Level Shrink Limits
+    def asset_shrink_rule(m, a):
+        old_asset_exposure = sum(m.E[i] for i in asset_mapping[a])
+        new_asset_exposure = sum(m.E[i] - m.S[i] + m.O[i] for i in asset_mapping[a])
+        return new_asset_exposure >= old_asset_exposure * (1.0 - m.MaxDec[a])
+    model.asset_shrink_con = pyo.Constraint(model.Assets, rule=asset_shrink_rule)
+    
+    return model
+# Build the model using the mapped parameters
+model = build_portfolio_model(E, P, RW, SC, OC, max_inc, max_dec, asset_mapping)
+# Display the model to verify its structure
+model.pprint()
+
+```
+```{python solve model}
+# 1. Instantiate the Pyomo model using our previously defined function and data dictionaries
+model = build_portfolio_model(E, P, RW, SC, OC, max_inc, max_dec, asset_mapping)
+
+# 2. Create the solver interface
+# We are using 'glpk', a standard open-source linear programming solver [1, 2].
+# You could also substitute this with 'cplex' or 'gurobi' if installed [3, 4].
+solver = pyo.SolverFactory('glpk')
+
+# 3. Solve the model
+# The tee=True argument streams the solver's output log to the console so we can monitor progress [5, 6].
+results = solver.solve(model, tee=True)
+
+# 4. Verify optimal termination
+# This function halts the script and raises an error if the solver fails to find an optimal solution [2, 7].
+pyo.assert_optimal_termination(results)
+
+# 5. Extract and display the results
+# pyo.value() is used to retrieve the numerical value of the objective and variables after solving [8, 9].
+print("\n" + "="*50)
+print(f"Optimal Expected Net Profit: ${pyo.value(model.obj):,.2f}")
+print("="*50)
+
+print("\nRecommended Rebalancing Actions:")
+# Iterate through all segments to see where the solver decided to act [10]
+for i in model.Segments:
+    sold = pyo.value(model.S[i])
+    originated = pyo.value(model.O[i])
+    
+    # Only print segments where an action (sell or originate) is taken
+    if sold > 0 or originated > 0:
+        print(f"Segment: {i}")
+        if sold > 0:
+            print(f"  - Sell: ${sold:,.2f}")
+        if originated > 0:
+            print(f"  - Originate: ${originated:,.2f}")
+
+```
