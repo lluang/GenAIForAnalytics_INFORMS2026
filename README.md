@@ -2,13 +2,16 @@
 
 ## Resources
 
-- Problem discussions
-- [PYOMO textbook from LLNL] (https://www.osti.gov/servlets/purl/1771935)
-- [PYOMO documentation (pdf)](https://pyomo.readthedocs.io/_/downloads/en/stable/pdf/)
+- [INFORMS Analytics Framework](background/INFORMS_Analytics_Framework.pdf)
+- [Problem background](background/ExampleDescription.docx)
 - [Gemini NotebookLM](https://notebooklm.google.com/)
   - For advanced users, use Gemini Gem, OpenAI Project, Claude Project, Copilot Agent
-  - For actual model development I use terminal based tools with an IDE. Gemini CLI, Claude Code, Codex
-- INFORMS Analytics Framework
+  - For actual model development I use terminal based tools with an IDE. e.g. Gemini CLI, Claude Code, Codex
+- [PYOMO textbook from LLNL](https://www.osti.gov/servlets/purl/1771935)
+- [PYOMO documentation (pdf)](https://pyomo.readthedocs.io/_/downloads/en/stable/pdf/)
+- [Data files](data)
+
+
 
 ## Exercise - ABC Financial
 
