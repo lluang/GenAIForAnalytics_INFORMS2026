@@ -2,6 +2,7 @@
 
 ## Resources
 
+- [Workshop presentation slides (pdf)](background/GenAIinAnalytics20260414.pdf)
 - [INFORMS Analytics Framework](background/INFORMS_Analytics_Framework.pdf)
 - [Problem background](background/ExampleDescription.docx)
 - [Gemini NotebookLM](https://notebooklm.google.com/)
@@ -20,7 +21,7 @@
   - Analytics method: Optimization
   - Case source: Advent of OR 2025 (ABC Financial)
 - You are NOT expected to have specific knowledge about the industry or method
-  - Gen AI as a low level aide
+  - Gen AI as an analytical aide
   - Gen AI will work on problem formulation, model development, communications
  
 - Structure of Exercise
